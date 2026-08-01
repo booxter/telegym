@@ -17,6 +17,7 @@ import (
 type Handlers struct {
 	Store             *Store
 	WebhookDispatcher *WebhookDispatcher
+	updates           *updateDispatcher
 }
 
 // errResp writes a Telegram-shaped error envelope.
@@ -24,15 +25,36 @@ func errResp(c *gin.Context, code int, desc string) {
 	c.JSON(code, APIResponse{OK: false, ErrorCode: code, Description: desc})
 }
 
-// readBody returns either parsed JSON body or, for multipart requests, a
-// map of form fields. The handler decides which keys it cares about.
+// readBody combines query parameters with parsed JSON, form-encoded, or
+// multipart fields. The handler decides which keys it cares about.
 func readBody(c *gin.Context) (map[string]any, error) {
+	out := make(map[string]any)
+	for k, v := range c.Request.URL.Query() {
+		if len(v) == 1 {
+			out[k] = v[0]
+		} else {
+			out[k] = v
+		}
+	}
+
 	ct := c.GetHeader("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 			return nil, err
 		}
-		out := make(map[string]any, len(c.Request.PostForm))
+		for k, v := range c.Request.PostForm {
+			if len(v) == 1 {
+				out[k] = v[0]
+			} else {
+				out[k] = v
+			}
+		}
+		return out, nil
+	}
+	if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+		if err := c.Request.ParseForm(); err != nil {
+			return nil, err
+		}
 		for k, v := range c.Request.PostForm {
 			if len(v) == 1 {
 				out[k] = v[0]
@@ -43,18 +65,21 @@ func readBody(c *gin.Context) (map[string]any, error) {
 		return out, nil
 	}
 	if c.Request.ContentLength == 0 {
-		return map[string]any{}, nil
+		return out, nil
 	}
 	body, err := c.GetRawData()
 	if err != nil {
 		return nil, err
 	}
 	if len(body) == 0 {
-		return map[string]any{}, nil
+		return out, nil
 	}
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, err
+	}
+	for k, v := range decoded {
+		out[k] = v
 	}
 	return out, nil
 }
@@ -83,6 +108,17 @@ func toString(v any) string {
 		return s
 	}
 	return ""
+}
+
+func toBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		value, _ := strconv.ParseBool(x)
+		return value
+	}
+	return false
 }
 
 func parseReplyMarkup(v any) *ReplyMarkup {
@@ -148,6 +184,21 @@ func fakeFileID(kind string) string {
 // =====================================================================
 // Bot API endpoints
 // =====================================================================
+
+func (h *Handlers) GetUpdates(c *gin.Context, bot *botEntry) {
+	if h.WebhookDispatcher != nil && h.WebhookDispatcher.hasTarget(bot) {
+		errResp(c, http.StatusConflict, "Conflict: can't use getUpdates method while webhook is active")
+		return
+	}
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	timeout := time.Duration(max(0, toInt(body["timeout"]))) * time.Second
+	updates := bot.updates.Poll(c.Request.Context(), toInt64(body["offset"]), toInt(body["limit"]), timeout)
+	c.JSON(http.StatusOK, APIResponse{OK: true, Result: updates})
+}
 
 func (h *Handlers) GetMe(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: bot.identity})
@@ -397,11 +448,22 @@ func (h *Handlers) SetWebhook(c *gin.Context, bot *botEntry) {
 	}
 	url := toString(body["url"])
 	secret := toString(body["secret_token"])
+	if toBool(body["drop_pending_updates"]) {
+		bot.updates.Clear()
+	}
 	bot.SetWebhook(url, secret)
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
 }
 
 func (h *Handlers) DeleteWebhook(c *gin.Context, bot *botEntry) {
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	if toBool(body["drop_pending_updates"]) {
+		bot.updates.Clear()
+	}
 	bot.SetWebhook("", "")
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
 }
@@ -411,7 +473,7 @@ func (h *Handlers) GetWebhookInfo(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: WebhookInfo{
 		URL:                  url,
 		HasCustomCertificate: false,
-		PendingUpdateCount:   0,
+		PendingUpdateCount:   bot.updates.Len(),
 		MaxConnections:       40,
 	}})
 }

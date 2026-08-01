@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +237,56 @@ func TestInjectUpdateFiresWebhook(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("webhook never fired within 2s")
+	}
+}
+
+func TestInjectUpdateQueuesForPolling(t *testing.T) {
+	srv := New(Config{Quiet: true})
+	const token = "888:polling_token"
+
+	payload := `{"token":"` + token + `","chat_id":42,"text":"queued"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/debug/inject/update", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"delivery_method":"polling"`) {
+		t.Fatalf("inject status=%d body=%s, want polling delivery", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/bot"+token+"/getUpdates?offset=0&limit=1", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("getUpdates status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var pollResp struct {
+		OK     bool     `json:"ok"`
+		Result []Update `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pollResp); err != nil {
+		t.Fatalf("decode getUpdates: %v", err)
+	}
+	if !pollResp.OK || len(pollResp.Result) != 1 || pollResp.Result[0].Message.Text != "queued" {
+		t.Fatalf("unexpected getUpdates response: %+v", pollResp)
+	}
+
+	rec = httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"offset":` + strconv.FormatInt(pollResp.Result[0].UpdateID+1, 10) + `}`)
+	req = httptest.NewRequest(http.MethodPost, "/bot"+token+"/getUpdates", body)
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"result":[]`) {
+		t.Fatalf("acknowledging getUpdates status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetUpdatesRejectsActiveWebhook(t *testing.T) {
+	srv := New(Config{Quiet: true, DefaultWebhookURL: "http://example.invalid/webhook"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/bot999:webhook/getUpdates", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"ok":false`) {
+		t.Fatalf("getUpdates status=%d body=%s, want Telegram-shaped conflict", rec.Code, rec.Body.String())
 	}
 }

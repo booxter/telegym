@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -82,12 +83,13 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 		}
 	}
 
-	status, err := h.WebhookDispatcher.Deliver(c.Request.Context(), bot, upd)
+	delivery, err := h.deliverUpdate(c.Request.Context(), bot, upd)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{
 			"ok":              false,
 			"update_id":       upd.UpdateID,
-			"delivery_status": status,
+			"delivery_status": delivery.Status,
+			"delivery_method": delivery.Method,
 			"error":           err.Error(),
 		})
 		return
@@ -95,12 +97,21 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 	resp := gin.H{
 		"ok":              true,
 		"update_id":       upd.UpdateID,
-		"delivery_status": status,
+		"delivery_status": delivery.Status,
+		"delivery_method": delivery.Method,
 	}
 	if upd.CallbackQuery != nil {
 		resp["callback_query_id"] = upd.CallbackQuery.ID
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handlers) deliverUpdate(ctx context.Context, bot *botEntry, upd Update) (updateDelivery, error) {
+	if h.updates != nil {
+		return h.updates.Deliver(ctx, bot, upd)
+	}
+	status, err := h.WebhookDispatcher.Deliver(ctx, bot, upd)
+	return updateDelivery{Method: "webhook", Status: status}, err
 }
 
 // DebugListMessages returns outbound messages stored for a bot, optionally

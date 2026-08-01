@@ -54,6 +54,8 @@ type botEntry struct {
 	toastsMu sync.Mutex
 	toasts   map[int64][]Toast
 
+	updates *updateQueue
+
 	maxMessages int
 	maxInputs   int
 }
@@ -120,6 +122,7 @@ func (s *Store) Bot(token string) *botEntry {
 		firstSeen:   now,
 		maxMessages: defaultMaxMessages,
 		maxInputs:   1000,
+		updates:     newUpdateQueue(),
 	}
 	b.lastSeen.Store(now)
 	s.bots[token] = b
