@@ -78,3 +78,25 @@ func TestStoreCountersMonotonic(t *testing.T) {
 		prevUpd = next
 	}
 }
+
+// TestFileStoreCapacityAndDelete covers configurable FIFO eviction and the
+// explicit cleanup path used by integration-test runners.
+func TestFileStoreCapacityAndDelete(t *testing.T) {
+	s := NewFileStore()
+	s.setMaxBytes(6)
+	first := s.Put("document", "application/octet-stream", "first", []byte("1234"))
+	second := s.Put("document", "application/octet-stream", "second", []byte("5678"))
+
+	if _, ok := s.Get(first); ok {
+		t.Fatalf("oldest file %q was not evicted", first)
+	}
+	if _, ok := s.Get(second); !ok {
+		t.Fatalf("newest file %q was unexpectedly evicted", second)
+	}
+	if !s.delete(second) {
+		t.Fatalf("delete(%q) = false, want true", second)
+	}
+	if count, bytes := s.Stats(); count != 0 || bytes != 0 {
+		t.Fatalf("store stats after delete = (%d, %d), want (0, 0)", count, bytes)
+	}
+}

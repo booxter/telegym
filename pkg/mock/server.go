@@ -16,6 +16,7 @@ type Config struct {
 	MetricsListen     string // ":9104" - empty disables
 	DefaultWebhookURL string // fallback when bot never called setWebhook
 	DefaultToken      string // pre-fills the debug chat home form (no auth, cosmetic)
+	FileStoreMaxBytes int64  // 0 uses the 100 MiB default
 	Quiet             bool   // suppress request logs (recommended for load runs)
 }
 
@@ -34,6 +35,9 @@ type Server struct {
 // in tests.
 func New(cfg Config) *Server {
 	store := NewStore()
+	if cfg.FileStoreMaxBytes > 0 {
+		store.Files.setMaxBytes(cfg.FileStoreMaxBytes)
+	}
 	disp := NewWebhookDispatcher(cfg.DefaultWebhookURL)
 	updates := newUpdateDispatcher(disp)
 	h := &Handlers{Store: store, WebhookDispatcher: disp, updates: updates}
@@ -153,6 +157,7 @@ func (s *Server) registerRoutes() {
 	// File storage (multipart uploads from bot, fetched by telegym-proxy)
 	s.router.GET("/debug/files", s.handlers.DebugListFiles)
 	s.router.GET("/debug/files/:file_id", s.handlers.DebugServeFile)
+	s.router.DELETE("/debug/files/:file_id", s.handlers.DebugDeleteFile)
 
 	// Proxy registration (telegym-proxy binds chat_ids → forward webhook)
 	s.router.POST("/debug/proxy/register", s.handlers.DebugProxyRegister)

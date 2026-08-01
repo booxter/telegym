@@ -15,6 +15,8 @@ const maxUploadFileBytes = 50 * 1024 * 1024
 
 var errUploadTooLarge = errors.New("uploaded file exceeds 50 MB")
 
+var errFileStoreTooSmall = errors.New("uploaded file exceeds file store capacity")
+
 type resolvedInputFile struct {
 	FileID       string
 	FileUniqueID string
@@ -77,6 +79,9 @@ func (h *Handlers) captureMultipartFile(c *gin.Context, kind, partName string) (
 	if len(data) > maxUploadFileBytes {
 		return resolvedInputFile{}, false, errUploadTooLarge
 	}
+	if int64(len(data)) > h.Store.Files.maxSize() {
+		return resolvedInputFile{}, false, errFileStoreTooSmall
+	}
 	contentType := fileHdr.Header.Get("Content-Type")
 	fileID := h.Store.Files.Put(kind, contentType, fileHdr.Filename, data)
 	return resolvedInputFile{
@@ -90,7 +95,7 @@ func (h *Handlers) captureMultipartFile(c *gin.Context, kind, partName string) (
 
 func respondInputFileError(c *gin.Context, err error) {
 	status := http.StatusBadRequest
-	if errors.Is(err, errUploadTooLarge) {
+	if errors.Is(err, errUploadTooLarge) || errors.Is(err, errFileStoreTooSmall) {
 		status = http.StatusRequestEntityTooLarge
 	}
 	errResp(c, status, "Bad Request: "+err.Error())

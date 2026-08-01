@@ -217,6 +217,17 @@ func (h *Handlers) DebugServeFile(c *gin.Context) {
 	_, _ = c.Writer.Write(f.Bytes)
 }
 
+// DebugDeleteFile releases captured bytes once a test runner has inspected
+// them. Deleting one file does not disturb concurrent uploads or other bots.
+func (h *Handlers) DebugDeleteFile(c *gin.Context) {
+	id := c.Param("file_id")
+	if !h.Store.Files.delete(id) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found", "file_id": id})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "file_id": id})
+}
+
 // DebugListFiles is a debugging convenience: shows store stats and the
 // most recent file_ids without contents.
 func (h *Handlers) DebugListFiles(c *gin.Context) {
@@ -224,6 +235,6 @@ func (h *Handlers) DebugListFiles(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"count":       count,
 		"total_bytes": bytes,
-		"max_bytes":   h.Store.Files.maxBytes,
+		"max_bytes":   h.Store.Files.maxSize(),
 	})
 }

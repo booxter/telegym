@@ -85,6 +85,53 @@ func TestSendDocumentRoundtrip(t *testing.T) {
 	assertDebugFile(t, srv, resp.Result.Document.FileID, wantBytes)
 }
 
+// TestFileRetentionLimitAndDelete verifies configured capacity failures are
+// explicit and captured files can be released through the HTTP debug API.
+func TestFileRetentionLimitAndDelete(t *testing.T) {
+	limited := New(Config{Quiet: true, FileStoreMaxBytes: 3})
+	body, contentType := newMultipartBody(t,
+		map[string]string{"chat_id": "42"},
+		map[string]testUpload{"document": {Filename: "large.bin", Bytes: []byte("1234")}},
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/bot1:limit/sendDocument", body)
+	req.Header.Set("Content-Type", contentType)
+	limited.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized store upload status=%d body=%s, want 413", rec.Code, rec.Body.String())
+	}
+
+	srv := New(Config{Quiet: true})
+	body, contentType = newMultipartBody(t,
+		map[string]string{"chat_id": "42"},
+		map[string]testUpload{"document": {Filename: "small.bin", Bytes: []byte("ok")}},
+	)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/bot2:delete/sendDocument", body)
+	req.Header.Set("Content-Type", contentType)
+	srv.Handler().ServeHTTP(rec, req)
+	var upload struct {
+		Result Message `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil || upload.Result.Document == nil {
+		t.Fatalf("decode retained document: err=%v body=%s", err, rec.Body.String())
+	}
+
+	fileID := upload.Result.Document.FileID
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/debug/files/"+fileID, nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete captured file status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/debug/files/"+fileID, nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("deleted file GET status=%d, want 404", rec.Code)
+	}
+}
+
 // TestSendMediaGroupRoundtrip verifies attach references are resolved by part
 // name, response order is preserved, and every album message is recorded.
 func TestSendMediaGroupRoundtrip(t *testing.T) {

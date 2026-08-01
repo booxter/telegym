@@ -117,6 +117,10 @@ The complete reference (grouped by binary, with comments on each variable)
 lives in [`.env.example`](.env.example). `make init` copies it to `.env`
 if you want a persistent local config.
 
+Multipart uploads use a 100 MiB in-memory FIFO by default. Increase
+`TELEGYM_MOCK_FILE_STORE_MAX_BYTES` for large albums; test runners can release
+captured bytes with `DELETE /debug/files/:file_id` after inspection.
+
 ## Repo layout
 
 ```
