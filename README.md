@@ -33,8 +33,11 @@ plus an `xk6` extension so k6 scenarios can drive virtual Telegram users.
 ```
   k6 scenario  ──► xk6-telegym ──► /debug/inject/update ──► telegym-mock
                                                               │
-                                                              ▼
-                                                  POST <bot_webhook_url>
+                                       ┌───────────────────────┴──────────────────────┐
+                                       ▼                                              ▼
+                           POST <bot_webhook_url>                         queued for getUpdates
+                                       │                                              │
+                                       └───────────────────────┬──────────────────────┘
                                                               │
                                                               ▼
                                                          your bot
@@ -209,14 +212,14 @@ relative - k6 is launched from repo root). Reads use `open('../data/...')`
 
 ## Bot API coverage
 
-All 176 Bot API methods are accepted and return shape-valid JSON. Coverage
-breaks down in two layers:
+All methods in the embedded Bot API spec are accepted and return shape-valid
+JSON. Coverage breaks down in two layers:
 
-- **Explicit handlers** (15 methods) for the ones with real side effects:
-  send/edit messages and media land in the outbound store (queryable via
-  `/debug/messages`), `setWebhook` registers the delivery URL, `getMe`
-  returns a stable identity per token, etc.
-- **Spec-driven generic dispatcher** for the remaining 161 methods. It loads
+- **Explicit handlers** for methods with real side effects: updates are
+  delivered by webhook or `getUpdates`; sent messages, documents, and media
+  groups land in the outbound store; multipart files are retained for debug
+  retrieval; webhook and identity methods update or return bot state.
+- **Spec-driven generic dispatcher** for the remaining methods. It loads
   an embedded `api.json` (from
   [PaulSonOfLars/telegram-bot-api-spec](https://github.com/PaulSonOfLars/telegram-bot-api-spec))
   and synthesises a zero-value response of the declared return type. So

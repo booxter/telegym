@@ -482,6 +482,10 @@ func mediaTag(m Message) string {
 		return "video"
 	case m.Animation != nil:
 		return "animation"
+	case m.Document != nil:
+		return "document"
+	case m.Audio != nil:
+		return "audio"
 	case m.Sticker != nil:
 		return "sticker"
 	case m.Dice != nil:

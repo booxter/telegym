@@ -232,8 +232,11 @@
       <h2 id="architecture">Architecture</h2>
       <pre><code>  k6 scenario  ──► xk6-telegym ──► /debug/inject/update ──► telegym-mock
                                                               │
-                                                              ▼
-                                                  POST &lt;bot_webhook_url&gt;
+                                       ┌───────────────────────┴──────────────────────┐
+                                       ▼                                              ▼
+                           POST &lt;bot_webhook_url&gt;                         queued for getUpdates
+                                       │                                              │
+                                       └───────────────────────┬──────────────────────┘
                                                               │
                                                               ▼
                                                          your bot
@@ -271,7 +274,7 @@ make build build-examples
 ./bin/telegym-mock
 TELEGRAM_API_URL=http://localhost:5678 \
 TELEGRAM_TOKEN=1234567890:telegym_default_mock_token_xxxxxxxx \
-./your-bot                          # bot calls setWebhook automatically
+./your-bot                          # webhook and polling bots are supported
 
 # Then pick a driver:
 open http://localhost:5678/debug/chat   # manual click-around in the browser
@@ -293,7 +296,7 @@ u.click('age_verify');               // inject a callback query</code></pre>
     <section>
       <h2 id="features">What's in the box</h2>
       <ul>
-        <li><strong>Mock Bot API server</strong> — all 176 methods accepted, 15 with real side effects, the rest dispatched via the official spec.</li>
+        <li><strong>Mock Bot API server</strong> — every method in the embedded spec is accepted, with stateful polling, webhooks, media uploads, and schema-driven fallbacks.</li>
         <li><strong>xk6 extension</strong> — virtual Telegram users from k6 scenarios with <code>send</code>, <code>click</code>, <code>awaitText</code>, <code>findButton</code>.</li>
         <li><strong>User pools</strong> — two-phase scenarios (register-then-replay) via NDJSON files, with <code>TAG</code> / <code>OFFSET</code> / <code>LIMIT</code> / <code>SHUFFLE</code> env knobs.</li>
         <li><strong>HTMX debug chat</strong> — browser UI for manual testing, served by the mock itself, no real Telegram.</li>

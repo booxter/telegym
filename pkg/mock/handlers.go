@@ -262,6 +262,29 @@ func (h *Handlers) EditMessageReplyMarkup(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
 }
 
+func (h *Handlers) EditMessageCaption(c *gin.Context, bot *botEntry) {
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	if toString(body["inline_message_id"]) != "" {
+		c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
+		return
+	}
+	m := Message{
+		MessageID:       toInt(body["message_id"]),
+		From:            &bot.identity,
+		Date:            time.Now().Unix(),
+		Chat:            Chat{ID: toInt64(body["chat_id"]), Type: "private"},
+		Caption:         toString(body["caption"]),
+		CaptionEntities: parseEntities(body["caption_entities"]),
+		ReplyMarkup:     parseReplyMarkup(body["reply_markup"]),
+	}
+	bot.AppendMessage(m)
+	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
+}
+
 func (h *Handlers) EditMessageMedia(c *gin.Context, bot *botEntry) {
 	body, err := readBody(c)
 	if err != nil {
@@ -318,32 +341,16 @@ func (h *Handlers) sendMedia(c *gin.Context, bot *botEntry, kind string) {
 	m := h.newBotMessage(bot, chatID)
 	m.Caption = toString(body["caption"])
 	m.Text = m.Caption
-	m.Entities = parseEntities(body["caption_entities"])
+	m.CaptionEntities = parseEntities(body["caption_entities"])
 	m.ReplyMarkup = parseReplyMarkup(body["reply_markup"])
 
-	// If this was a multipart upload, capture the actual bytes into the
-	// FileStore so telegym-proxy can later forward the real file to Telegram.
-	// For file_id-only requests (cached), we keep the existing fake ID.
-	fileID := h.captureUploadedFile(c, kind)
-	if fileID == "" {
-		// Fall back to whatever was passed in the body as file reference,
-		// or a fresh fake ID if nothing was provided.
-		if ref := toString(body[kind]); ref != "" {
-			fileID = ref
-		} else {
-			fileID = fakeFileID(kind)
-		}
+	file, err := h.resolveInputFile(c, kind, toString(body[kind]), kind)
+	if err != nil {
+		respondInputFileError(c, err)
+		return
 	}
-	uniqueID := fileID + "_u"
 
-	switch kind {
-	case "photo":
-		m.Photo = []PhotoSize{{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1}}
-	case "video":
-		m.Video = &Video{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1, Duration: 1}
-	case "animation":
-		m.Animation = &Animation{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1, Duration: 1}
-	case "sticker":
+	if kind == "sticker" {
 		// Real Telegram stores an emoji per sticker in its sticker-set DB
 		// and returns it on every send. The mock has no such DB, so we
 		// only know an emoji when the bot explicitly passes one in the
@@ -351,55 +358,23 @@ func (h *Handlers) sendMedia(c *gin.Context, bot *botEntry, kind string) {
 		// surface the absence so it's obvious nothing was supplied,
 		// instead of hiding it behind a default.
 		m.Sticker = &Sticker{
-			FileID: fileID, FileUniqueID: uniqueID,
+			FileID: file.FileID, FileUniqueID: file.FileUniqueID,
 			Type: "regular", Width: 1, Height: 1,
 			Emoji: toString(body["emoji"]),
 		}
+	} else if err := applyMedia(&m, kind, file, body); err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
 	}
 	bot.AppendMessage(m)
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
-}
-
-// captureUploadedFile reads the named multipart file (if present) and stores
-// it in the file store, returning the assigned file_id. Returns "" if the
-// request wasn't multipart or didn't carry the named file.
-func (h *Handlers) captureUploadedFile(c *gin.Context, fieldName string) string {
-	ct := c.GetHeader("Content-Type")
-	if !strings.HasPrefix(ct, "multipart/form-data") {
-		return ""
-	}
-	fileHdr, err := c.FormFile(fieldName)
-	if err != nil || fileHdr == nil {
-		return ""
-	}
-	src, err := fileHdr.Open()
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = src.Close() }()
-	const maxFile = 50 * 1024 * 1024 // 50 MB per file
-	buf := make([]byte, 0, fileHdr.Size)
-	tmp := make([]byte, 32*1024)
-	for {
-		n, rerr := src.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-			if len(buf) > maxFile {
-				return ""
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	ctype := fileHdr.Header.Get("Content-Type")
-	return h.Store.Files.Put(fieldName, ctype, fileHdr.Filename, buf)
 }
 
 func (h *Handlers) SendPhoto(c *gin.Context, b *botEntry)     { h.sendMedia(c, b, "photo") }
 func (h *Handlers) SendVideo(c *gin.Context, b *botEntry)     { h.sendMedia(c, b, "video") }
 func (h *Handlers) SendAnimation(c *gin.Context, b *botEntry) { h.sendMedia(c, b, "animation") }
 func (h *Handlers) SendSticker(c *gin.Context, b *botEntry)   { h.sendMedia(c, b, "sticker") }
+func (h *Handlers) SendDocument(c *gin.Context, b *botEntry)  { h.sendMedia(c, b, "document") }
 
 func (h *Handlers) SendDice(c *gin.Context, bot *botEntry) {
 	body, err := readBody(c)

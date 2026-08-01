@@ -23,7 +23,7 @@ type FileStore struct {
 
 type storedFile struct {
 	ID          string
-	Kind        string // "photo" | "video" | "animation" | "sticker"
+	Kind        string // Telegram media type, e.g. photo, video, or document
 	ContentType string
 	Filename    string
 	Bytes       []byte
