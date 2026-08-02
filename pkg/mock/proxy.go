@@ -228,6 +228,17 @@ func (h *Handlers) DebugDeleteFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "file_id": id})
 }
 
+// DebugDeleteFiles releases every captured upload. This gives test runners a
+// reliable cleanup path for orphaned files from interrupted multipart calls.
+func (h *Handlers) DebugDeleteFiles(c *gin.Context) {
+	count, bytes := h.Store.Files.clear()
+	c.JSON(http.StatusOK, gin.H{
+		"ok":            true,
+		"deleted":       count,
+		"deleted_bytes": bytes,
+	})
+}
+
 // DebugListFiles is a debugging convenience: shows store stats and the
 // most recent file_ids without contents.
 func (h *Handlers) DebugListFiles(c *gin.Context) {

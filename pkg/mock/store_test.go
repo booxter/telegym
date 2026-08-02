@@ -100,3 +100,30 @@ func TestFileStoreCapacityAndDelete(t *testing.T) {
 		t.Fatalf("store stats after delete = (%d, %d), want (0, 0)", count, bytes)
 	}
 }
+
+func TestFileStoreClear(t *testing.T) {
+	s := NewFileStore()
+	s.setMaxBytes(8)
+	first := s.Put("document", "application/octet-stream", "first", []byte("123"))
+	second := s.Put("document", "application/octet-stream", "second", []byte("4567"))
+
+	if count, bytes := s.clear(); count != 2 || bytes != 7 {
+		t.Fatalf("clear() = (%d, %d), want (2, 7)", count, bytes)
+	}
+	if count, bytes := s.Stats(); count != 0 || bytes != 0 {
+		t.Fatalf("store stats after clear = (%d, %d), want (0, 0)", count, bytes)
+	}
+	if _, ok := s.Get(first); ok {
+		t.Fatalf("first file %q remains after clear", first)
+	}
+	if _, ok := s.Get(second); ok {
+		t.Fatalf("second file %q remains after clear", second)
+	}
+	if got := s.maxSize(); got != 8 {
+		t.Fatalf("maxSize() after clear = %d, want 8", got)
+	}
+	third := s.Put("document", "application/octet-stream", "third", []byte("8"))
+	if third == first || third == second {
+		t.Fatalf("file ID sequence was reset by clear: %q", third)
+	}
+}

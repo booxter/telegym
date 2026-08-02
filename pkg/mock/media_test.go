@@ -132,6 +132,52 @@ func TestFileRetentionLimitAndDelete(t *testing.T) {
 	}
 }
 
+// TestDeleteAllFiles verifies the collection cleanup endpoint releases all
+// captured bytes, including files whose IDs a test runner did not retain.
+func TestDeleteAllFiles(t *testing.T) {
+	srv := New(Config{Quiet: true})
+	first := srv.store.Files.Put("photo", "image/jpeg", "one.jpg", []byte("one"))
+	second := srv.store.Files.Put("video", "video/mp4", "two.mp4", []byte("two-two"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/debug/files", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	var response struct {
+		OK           bool  `json:"ok"`
+		Deleted      int   `json:"deleted"`
+		DeletedBytes int64 `json:"deleted_bytes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode delete-all response: %v -- body=%s", err, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK || !response.OK || response.Deleted != 2 || response.DeletedBytes != 10 {
+		t.Fatalf("delete-all status=%d response=%+v", rec.Code, response)
+	}
+	for _, fileID := range []string{first, second} {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/debug/files/"+fileID, nil)
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("cleared file %q GET status=%d, want 404", fileID, rec.Code)
+		}
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/debug/files", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	response = struct {
+		OK           bool  `json:"ok"`
+		Deleted      int   `json:"deleted"`
+		DeletedBytes int64 `json:"deleted_bytes"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode empty delete-all response: %v -- body=%s", err, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK || !response.OK || response.Deleted != 0 || response.DeletedBytes != 0 {
+		t.Fatalf("empty delete-all status=%d response=%+v", rec.Code, response)
+	}
+}
+
 // TestSendMediaGroupRoundtrip verifies attach references are resolved by part
 // name, response order is preserved, and every album message is recorded.
 func TestSendMediaGroupRoundtrip(t *testing.T) {

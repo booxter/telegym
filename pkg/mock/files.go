@@ -114,6 +114,19 @@ func (s *FileStore) delete(id string) bool {
 	return true
 }
 
+// clear removes every retained file and returns the released item and byte
+// counts. Capacity configuration and the file ID sequence are preserved.
+func (s *FileStore) clear() (int, int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := len(s.files)
+	bytes := s.totalSize
+	s.files = map[string]*storedFile{}
+	s.order = nil
+	s.totalSize = 0
+	return count, bytes
+}
+
 // Stats reports current usage; used by /debug/files (no-arg) for visibility.
 func (s *FileStore) Stats() (count int, bytes int64) {
 	s.mu.Lock()

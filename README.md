@@ -119,7 +119,8 @@ if you want a persistent local config.
 
 Multipart uploads use a 100 MiB in-memory FIFO by default. Increase
 `TELEGYM_MOCK_FILE_STORE_MAX_BYTES` for large albums; test runners can release
-captured bytes with `DELETE /debug/files/:file_id` after inspection.
+individual captures with `DELETE /debug/files/:file_id`, or clear the entire
+store with `DELETE /debug/files` after inspection.
 
 ## Repo layout
 
