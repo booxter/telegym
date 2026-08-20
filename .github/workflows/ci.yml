@@ -110,6 +110,18 @@ jobs:
         working-directory: pkg/xk6
         run: go test -race -timeout 5m ./...
 
+  nixos-test:
+    name: NixOS test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Run NixOS test
+        run: nix build .#checks.x86_64-linux.nixos-service --print-build-logs
+
   build:
     name: Build
     runs-on: ubuntu-latest
