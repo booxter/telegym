@@ -4,7 +4,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/release-26.05";
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -29,5 +29,21 @@
           default = telegym;
         }
       );
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nixos-service = import ./nix/tests/service.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+            package = self.packages.${system}.telegym;
+          };
+        }
+      );
+
+      nixosModules.default = import ./nix/module.nix { inherit self; };
     };
 }
