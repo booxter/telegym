@@ -17,6 +17,7 @@ import (
 type Handlers struct {
 	Store             *Store
 	WebhookDispatcher *WebhookDispatcher
+	updates           *updateDispatcher
 }
 
 // errResp writes a Telegram-shaped error envelope.
@@ -24,15 +25,36 @@ func errResp(c *gin.Context, code int, desc string) {
 	c.JSON(code, APIResponse{OK: false, ErrorCode: code, Description: desc})
 }
 
-// readBody returns either parsed JSON body or, for multipart requests, a
-// map of form fields. The handler decides which keys it cares about.
+// readBody combines query parameters with parsed JSON, form-encoded, or
+// multipart fields. The handler decides which keys it cares about.
 func readBody(c *gin.Context) (map[string]any, error) {
+	out := make(map[string]any)
+	for k, v := range c.Request.URL.Query() {
+		if len(v) == 1 {
+			out[k] = v[0]
+		} else {
+			out[k] = v
+		}
+	}
+
 	ct := c.GetHeader("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 			return nil, err
 		}
-		out := make(map[string]any, len(c.Request.PostForm))
+		for k, v := range c.Request.PostForm {
+			if len(v) == 1 {
+				out[k] = v[0]
+			} else {
+				out[k] = v
+			}
+		}
+		return out, nil
+	}
+	if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+		if err := c.Request.ParseForm(); err != nil {
+			return nil, err
+		}
 		for k, v := range c.Request.PostForm {
 			if len(v) == 1 {
 				out[k] = v[0]
@@ -43,18 +65,21 @@ func readBody(c *gin.Context) (map[string]any, error) {
 		return out, nil
 	}
 	if c.Request.ContentLength == 0 {
-		return map[string]any{}, nil
+		return out, nil
 	}
 	body, err := c.GetRawData()
 	if err != nil {
 		return nil, err
 	}
 	if len(body) == 0 {
-		return map[string]any{}, nil
+		return out, nil
 	}
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, err
+	}
+	for k, v := range decoded {
+		out[k] = v
 	}
 	return out, nil
 }
@@ -83,6 +108,17 @@ func toString(v any) string {
 		return s
 	}
 	return ""
+}
+
+func toBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		value, _ := strconv.ParseBool(x)
+		return value
+	}
+	return false
 }
 
 func parseReplyMarkup(v any) *ReplyMarkup {
@@ -149,6 +185,21 @@ func fakeFileID(kind string) string {
 // Bot API endpoints
 // =====================================================================
 
+func (h *Handlers) GetUpdates(c *gin.Context, bot *botEntry) {
+	if h.WebhookDispatcher != nil && h.WebhookDispatcher.hasTarget(bot) {
+		errResp(c, http.StatusConflict, "Conflict: can't use getUpdates method while webhook is active")
+		return
+	}
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	timeout := time.Duration(max(0, toInt(body["timeout"]))) * time.Second
+	updates := bot.updates.Poll(c.Request.Context(), toInt64(body["offset"]), toInt(body["limit"]), timeout)
+	c.JSON(http.StatusOK, APIResponse{OK: true, Result: updates})
+}
+
 func (h *Handlers) GetMe(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: bot.identity})
 }
@@ -211,6 +262,29 @@ func (h *Handlers) EditMessageReplyMarkup(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
 }
 
+func (h *Handlers) EditMessageCaption(c *gin.Context, bot *botEntry) {
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	if toString(body["inline_message_id"]) != "" {
+		c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
+		return
+	}
+	m := Message{
+		MessageID:       toInt(body["message_id"]),
+		From:            &bot.identity,
+		Date:            time.Now().Unix(),
+		Chat:            Chat{ID: toInt64(body["chat_id"]), Type: "private"},
+		Caption:         toString(body["caption"]),
+		CaptionEntities: parseEntities(body["caption_entities"]),
+		ReplyMarkup:     parseReplyMarkup(body["reply_markup"]),
+	}
+	bot.AppendMessage(m)
+	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
+}
+
 func (h *Handlers) EditMessageMedia(c *gin.Context, bot *botEntry) {
 	body, err := readBody(c)
 	if err != nil {
@@ -267,32 +341,16 @@ func (h *Handlers) sendMedia(c *gin.Context, bot *botEntry, kind string) {
 	m := h.newBotMessage(bot, chatID)
 	m.Caption = toString(body["caption"])
 	m.Text = m.Caption
-	m.Entities = parseEntities(body["caption_entities"])
+	m.CaptionEntities = parseEntities(body["caption_entities"])
 	m.ReplyMarkup = parseReplyMarkup(body["reply_markup"])
 
-	// If this was a multipart upload, capture the actual bytes into the
-	// FileStore so telegym-proxy can later forward the real file to Telegram.
-	// For file_id-only requests (cached), we keep the existing fake ID.
-	fileID := h.captureUploadedFile(c, kind)
-	if fileID == "" {
-		// Fall back to whatever was passed in the body as file reference,
-		// or a fresh fake ID if nothing was provided.
-		if ref := toString(body[kind]); ref != "" {
-			fileID = ref
-		} else {
-			fileID = fakeFileID(kind)
-		}
+	file, err := h.resolveInputFile(c, kind, toString(body[kind]), kind)
+	if err != nil {
+		respondInputFileError(c, err)
+		return
 	}
-	uniqueID := fileID + "_u"
 
-	switch kind {
-	case "photo":
-		m.Photo = []PhotoSize{{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1}}
-	case "video":
-		m.Video = &Video{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1, Duration: 1}
-	case "animation":
-		m.Animation = &Animation{FileID: fileID, FileUniqueID: uniqueID, Width: 1, Height: 1, Duration: 1}
-	case "sticker":
+	if kind == "sticker" {
 		// Real Telegram stores an emoji per sticker in its sticker-set DB
 		// and returns it on every send. The mock has no such DB, so we
 		// only know an emoji when the bot explicitly passes one in the
@@ -300,55 +358,23 @@ func (h *Handlers) sendMedia(c *gin.Context, bot *botEntry, kind string) {
 		// surface the absence so it's obvious nothing was supplied,
 		// instead of hiding it behind a default.
 		m.Sticker = &Sticker{
-			FileID: fileID, FileUniqueID: uniqueID,
+			FileID: file.FileID, FileUniqueID: file.FileUniqueID,
 			Type: "regular", Width: 1, Height: 1,
 			Emoji: toString(body["emoji"]),
 		}
+	} else if err := applyMedia(&m, kind, file, body); err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
 	}
 	bot.AppendMessage(m)
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: m})
-}
-
-// captureUploadedFile reads the named multipart file (if present) and stores
-// it in the file store, returning the assigned file_id. Returns "" if the
-// request wasn't multipart or didn't carry the named file.
-func (h *Handlers) captureUploadedFile(c *gin.Context, fieldName string) string {
-	ct := c.GetHeader("Content-Type")
-	if !strings.HasPrefix(ct, "multipart/form-data") {
-		return ""
-	}
-	fileHdr, err := c.FormFile(fieldName)
-	if err != nil || fileHdr == nil {
-		return ""
-	}
-	src, err := fileHdr.Open()
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = src.Close() }()
-	const maxFile = 50 * 1024 * 1024 // 50 MB per file
-	buf := make([]byte, 0, fileHdr.Size)
-	tmp := make([]byte, 32*1024)
-	for {
-		n, rerr := src.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-			if len(buf) > maxFile {
-				return ""
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	ctype := fileHdr.Header.Get("Content-Type")
-	return h.Store.Files.Put(fieldName, ctype, fileHdr.Filename, buf)
 }
 
 func (h *Handlers) SendPhoto(c *gin.Context, b *botEntry)     { h.sendMedia(c, b, "photo") }
 func (h *Handlers) SendVideo(c *gin.Context, b *botEntry)     { h.sendMedia(c, b, "video") }
 func (h *Handlers) SendAnimation(c *gin.Context, b *botEntry) { h.sendMedia(c, b, "animation") }
 func (h *Handlers) SendSticker(c *gin.Context, b *botEntry)   { h.sendMedia(c, b, "sticker") }
+func (h *Handlers) SendDocument(c *gin.Context, b *botEntry)  { h.sendMedia(c, b, "document") }
 
 func (h *Handlers) SendDice(c *gin.Context, bot *botEntry) {
 	body, err := readBody(c)
@@ -397,11 +423,22 @@ func (h *Handlers) SetWebhook(c *gin.Context, bot *botEntry) {
 	}
 	url := toString(body["url"])
 	secret := toString(body["secret_token"])
+	if toBool(body["drop_pending_updates"]) {
+		bot.updates.Clear()
+	}
 	bot.SetWebhook(url, secret)
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
 }
 
 func (h *Handlers) DeleteWebhook(c *gin.Context, bot *botEntry) {
+	body, err := readBody(c)
+	if err != nil {
+		errResp(c, http.StatusBadRequest, "Bad Request: "+err.Error())
+		return
+	}
+	if toBool(body["drop_pending_updates"]) {
+		bot.updates.Clear()
+	}
 	bot.SetWebhook("", "")
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: true})
 }
@@ -411,7 +448,7 @@ func (h *Handlers) GetWebhookInfo(c *gin.Context, bot *botEntry) {
 	c.JSON(http.StatusOK, APIResponse{OK: true, Result: WebhookInfo{
 		URL:                  url,
 		HasCustomCertificate: false,
-		PendingUpdateCount:   0,
+		PendingUpdateCount:   bot.updates.Len(),
 		MaxConnections:       40,
 	}})
 }

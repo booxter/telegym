@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +237,143 @@ func TestInjectUpdateFiresWebhook(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("webhook never fired within 2s")
+	}
+}
+
+func TestInjectUpdateQueuesForPolling(t *testing.T) {
+	srv := New(Config{Quiet: true})
+	const token = "888:polling_token"
+
+	payload := `{"token":"` + token + `","chat_id":42,"text":"queued"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/debug/inject/update", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"delivery_method":"polling"`) {
+		t.Fatalf("inject status=%d body=%s, want polling delivery", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/bot"+token+"/getUpdates?offset=0&limit=1", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("getUpdates status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var pollResp struct {
+		OK     bool     `json:"ok"`
+		Result []Update `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pollResp); err != nil {
+		t.Fatalf("decode getUpdates: %v", err)
+	}
+	if !pollResp.OK || len(pollResp.Result) != 1 || pollResp.Result[0].Message.Text != "queued" {
+		t.Fatalf("unexpected getUpdates response: %+v", pollResp)
+	}
+
+	rec = httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"offset":` + strconv.FormatInt(pollResp.Result[0].UpdateID+1, 10) + `}`)
+	req = httptest.NewRequest(http.MethodPost, "/bot"+token+"/getUpdates", body)
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"result":[]`) {
+		t.Fatalf("acknowledging getUpdates status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInjectGroupEditedMessage(t *testing.T) {
+	srv := New(Config{Quiet: true})
+	const token = "889:edited_message_token"
+
+	payload := `{
+		"token":"` + token + `",
+		"type":"edited_message",
+		"chat_id":-10042,
+		"chat_type":"supergroup",
+		"chat_title":"Test group",
+		"user_id":7,
+		"message_id":123,
+		"text":"corrected"
+	}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/debug/inject/update", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inject status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/bot"+token+"/getUpdates?limit=1", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	var pollResp struct {
+		OK     bool     `json:"ok"`
+		Result []Update `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pollResp); err != nil {
+		t.Fatalf("decode getUpdates: %v", err)
+	}
+	if !pollResp.OK || len(pollResp.Result) != 1 {
+		t.Fatalf("unexpected getUpdates response: %+v", pollResp)
+	}
+	message := pollResp.Result[0].EditedMessage
+	if message == nil || message.MessageID != 123 || message.Text != "corrected" ||
+		message.Chat.ID != -10042 || message.Chat.Type != "supergroup" || message.Chat.Title != "Test group" {
+		t.Fatalf("unexpected edited message: %+v", message)
+	}
+}
+
+func TestInjectChatMember(t *testing.T) {
+	srv := New(Config{Quiet: true})
+	const token = "890:chat_member_token"
+
+	payload := `{
+		"token":"` + token + `",
+		"type":"chat_member",
+		"chat_id":-10042,
+		"chat_type":"supergroup",
+		"chat_title":"Test group",
+		"user_id":7,
+		"first_name":"Newcomer",
+		"actor_id":9,
+		"old_status":"left",
+		"new_status":"member"
+	}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/debug/inject/update", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inject status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/bot"+token+"/getUpdates?limit=1", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	var pollResp struct {
+		OK     bool     `json:"ok"`
+		Result []Update `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pollResp); err != nil {
+		t.Fatalf("decode getUpdates: %v", err)
+	}
+	if !pollResp.OK || len(pollResp.Result) != 1 {
+		t.Fatalf("unexpected getUpdates response: %+v", pollResp)
+	}
+	member := pollResp.Result[0].ChatMember
+	if member == nil || member.Chat.Type != "supergroup" || member.From.ID != 9 ||
+		member.OldChatMember.Status != "left" || member.NewChatMember.Status != "member" ||
+		member.NewChatMember.User.ID != 7 || member.NewChatMember.User.FirstName != "Newcomer" {
+		t.Fatalf("unexpected chat member update: %+v", member)
+	}
+}
+
+func TestGetUpdatesRejectsActiveWebhook(t *testing.T) {
+	srv := New(Config{Quiet: true, DefaultWebhookURL: "http://example.invalid/webhook"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/bot999:webhook/getUpdates", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"ok":false`) {
+		t.Fatalf("getUpdates status=%d body=%s, want Telegram-shaped conflict", rec.Code, rec.Body.String())
 	}
 }

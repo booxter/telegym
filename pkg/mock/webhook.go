@@ -35,14 +35,24 @@ func NewWebhookDispatcher(defaultURL string) *WebhookDispatcher {
 	}
 }
 
+func (d *WebhookDispatcher) target(bot *botEntry) (url, secret string) {
+	url, secret = bot.Webhook()
+	if url == "" {
+		url = d.defaultURL
+	}
+	return url, secret
+}
+
+func (d *WebhookDispatcher) hasTarget(bot *botEntry) bool {
+	url, _ := d.target(bot)
+	return url != ""
+}
+
 // Deliver posts the update to the bot's webhook. Returns the bot's HTTP
 // status and any error so callers can surface delivery problems to the test
 // runner instead of swallowing them.
 func (d *WebhookDispatcher) Deliver(ctx context.Context, bot *botEntry, upd Update) (int, error) {
-	url, secret := bot.Webhook()
-	if url == "" {
-		url = d.defaultURL
-	}
+	url, secret := d.target(bot)
 	if url == "" {
 		d.observe("no_url", 0)
 		return 0, fmt.Errorf("no webhook URL set for bot (call setWebhook or set TELEGYM_MOCK_DEFAULT_WEBHOOK)")

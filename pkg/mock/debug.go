@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,20 +13,31 @@ import (
 // to drive the bot: inject Updates and inspect what the bot has sent.
 
 // InjectUpdateRequest describes a synthetic Update the load runner wants to
-// deliver to the bot via webhook. Either Message or CallbackQuery is required.
+// deliver to the bot. Type defaults to message, or callback_query when
+// callback_data is present, preserving the original convenience API.
 type InjectUpdateRequest struct {
 	Token string `json:"token" binding:"required"`
+	Type  string `json:"type"`
 
 	// Message-shaped update
 	UserID    int64  `json:"user_id"`
+	IsBot     bool   `json:"is_bot"`
 	ChatID    int64  `json:"chat_id"`
+	ChatType  string `json:"chat_type"`
+	ChatTitle string `json:"chat_title"`
 	Username  string `json:"username"`
 	FirstName string `json:"first_name"`
 	Text      string `json:"text"`
+	MessageID int    `json:"message_id"`
 
 	// Callback-shaped update
 	CallbackData string `json:"callback_data"`
-	MessageID    int    `json:"message_id"` // message the callback button belongs to
+
+	// Chat-member-shaped update. ActorID identifies who caused the change;
+	// when omitted the affected user is also the actor.
+	ActorID   int64  `json:"actor_id"`
+	OldStatus string `json:"old_status"`
+	NewStatus string `json:"new_status"`
 }
 
 func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
@@ -47,12 +59,23 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 	if req.Username == "" {
 		req.Username = "user_" + strconv.FormatInt(req.UserID, 10)
 	}
+	if req.ChatType == "" {
+		req.ChatType = "private"
+	}
+	if req.Type == "" {
+		if req.CallbackData != "" {
+			req.Type = "callback_query"
+		} else {
+			req.Type = "message"
+		}
+	}
 
-	from := User{ID: req.UserID, IsBot: false, FirstName: req.FirstName, Username: req.Username}
+	from := User{ID: req.UserID, IsBot: req.IsBot, FirstName: req.FirstName, Username: req.Username}
+	chat := Chat{ID: req.ChatID, Type: req.ChatType, Title: req.ChatTitle}
 	upd := Update{UpdateID: h.Store.NextUpdateID()}
 
-	switch {
-	case req.CallbackData != "":
+	switch req.Type {
+	case "callback_query":
 		cbID := strconv.FormatInt(time.Now().UnixNano(), 10)
 		upd.CallbackQuery = &CallbackQuery{
 			ID:           cbID,
@@ -61,7 +84,7 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 			Data:         req.CallbackData,
 			Message: &Message{
 				MessageID: req.MessageID,
-				Chat:      Chat{ID: req.ChatID, Type: "private"},
+				Chat:      chat,
 				Date:      time.Now().Unix(),
 			},
 		}
@@ -69,25 +92,51 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 		// answerCallbackQuery(cb_id, text=...) can route the toast back
 		// to the correct chat for the debug UI.
 		bot.RegisterCallback(cbID, req.ChatID)
-	default:
-		upd.Message = &Message{
-			MessageID: h.Store.NextMessageID(),
+	case "message", "edited_message":
+		messageID := req.MessageID
+		if messageID == 0 {
+			messageID = h.Store.NextMessageID()
+		}
+		message := &Message{
+			MessageID: messageID,
 			From:      &from,
 			Date:      time.Now().Unix(),
-			Chat: Chat{
-				ID: req.ChatID, Type: "private",
-				FirstName: req.FirstName, Username: req.Username,
-			},
-			Text: req.Text,
+			Chat:      chat,
+			Text:      req.Text,
 		}
+		if req.Type == "edited_message" {
+			upd.EditedMessage = message
+		} else {
+			upd.Message = message
+		}
+	case "chat_member":
+		if req.OldStatus == "" || req.NewStatus == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "old_status and new_status are required for chat_member"})
+			return
+		}
+		actor := from
+		if req.ActorID != 0 && req.ActorID != req.UserID {
+			actor = User{ID: req.ActorID, IsBot: false, FirstName: "update actor"}
+		}
+		upd.ChatMember = &ChatMemberUpdated{
+			Chat:          chat,
+			From:          actor,
+			Date:          time.Now().Unix(),
+			OldChatMember: ChatMember{Status: req.OldStatus, User: from},
+			NewChatMember: ChatMember{Status: req.NewStatus, User: from},
+		}
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported update type"})
+		return
 	}
 
-	status, err := h.WebhookDispatcher.Deliver(c.Request.Context(), bot, upd)
+	delivery, err := h.deliverUpdate(c.Request.Context(), bot, upd)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{
 			"ok":              false,
 			"update_id":       upd.UpdateID,
-			"delivery_status": status,
+			"delivery_status": delivery.Status,
+			"delivery_method": delivery.Method,
 			"error":           err.Error(),
 		})
 		return
@@ -95,12 +144,21 @@ func (h *Handlers) DebugInjectUpdate(c *gin.Context) {
 	resp := gin.H{
 		"ok":              true,
 		"update_id":       upd.UpdateID,
-		"delivery_status": status,
+		"delivery_status": delivery.Status,
+		"delivery_method": delivery.Method,
 	}
 	if upd.CallbackQuery != nil {
 		resp["callback_query_id"] = upd.CallbackQuery.ID
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handlers) deliverUpdate(ctx context.Context, bot *botEntry, upd Update) (updateDelivery, error) {
+	if h.updates != nil {
+		return h.updates.Deliver(ctx, bot, upd)
+	}
+	status, err := h.WebhookDispatcher.Deliver(ctx, bot, upd)
+	return updateDelivery{Method: "webhook", Status: status}, err
 }
 
 // DebugListMessages returns outbound messages stored for a bot, optionally
@@ -138,6 +196,33 @@ func (h *Handlers) DebugClearMessages(c *gin.Context) {
 	}
 	bot := h.Store.Bot(token)
 	n := bot.ClearMessages()
+	c.JSON(http.StatusOK, gin.H{"cleared": n})
+}
+
+// DebugListRequests returns recent Bot API calls in invocation order. It is
+// useful for asserting boolean-returning methods whose effects are otherwise
+// invisible, such as deleteMessage and banChatMember.
+func (h *Handlers) DebugListRequests(c *gin.Context) {
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token path param required"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	requests := h.Store.Bot(token).Requests(c.Query("method"), limit)
+	c.JSON(http.StatusOK, gin.H{
+		"count":    len(requests),
+		"requests": requests,
+	})
+}
+
+func (h *Handlers) DebugClearRequests(c *gin.Context) {
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token path param required"})
+		return
+	}
+	n := h.Store.Bot(token).ClearRequests()
 	c.JSON(http.StatusOK, gin.H{"cleared": n})
 }
 

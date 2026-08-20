@@ -16,6 +16,7 @@ type Config struct {
 	MetricsListen     string // ":9104" - empty disables
 	DefaultWebhookURL string // fallback when bot never called setWebhook
 	DefaultToken      string // pre-fills the debug chat home form (no auth, cosmetic)
+	FileStoreMaxBytes int64  // 0 uses the 100 MiB default
 	Quiet             bool   // suppress request logs (recommended for load runs)
 }
 
@@ -34,8 +35,12 @@ type Server struct {
 // in tests.
 func New(cfg Config) *Server {
 	store := NewStore()
+	if cfg.FileStoreMaxBytes > 0 {
+		store.Files.setMaxBytes(cfg.FileStoreMaxBytes)
+	}
 	disp := NewWebhookDispatcher(cfg.DefaultWebhookURL)
-	h := &Handlers{Store: store, WebhookDispatcher: disp}
+	updates := newUpdateDispatcher(disp)
+	h := &Handlers{Store: store, WebhookDispatcher: disp, updates: updates}
 
 	if !cfg.Quiet {
 		gin.SetMode(gin.DebugMode)
@@ -57,11 +62,12 @@ func New(cfg Config) *Server {
 		cfg:      cfg,
 		store:    store,
 		handlers: h,
-		chat:     newChatHandlers(store, disp),
+		chat:     newChatHandlers(store, updates),
 		metrics:  metrics,
 		router:   router,
 	}
 	router.Use(metrics.ginMiddleware())
+	router.Use(s.requestJournalMiddleware())
 	s.registerRoutes()
 	return s
 }
@@ -148,10 +154,14 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/debug/inject/update", s.handlers.DebugInjectUpdate)
 	s.router.GET("/debug/messages/:token", s.handlers.DebugListMessages)
 	s.router.POST("/debug/messages/:token/clear", s.handlers.DebugClearMessages)
+	s.router.GET("/debug/requests/:token", s.handlers.DebugListRequests)
+	s.router.POST("/debug/requests/:token/clear", s.handlers.DebugClearRequests)
 
 	// File storage (multipart uploads from bot, fetched by telegym-proxy)
 	s.router.GET("/debug/files", s.handlers.DebugListFiles)
+	s.router.DELETE("/debug/files", s.handlers.DebugDeleteFiles)
 	s.router.GET("/debug/files/:file_id", s.handlers.DebugServeFile)
+	s.router.DELETE("/debug/files/:file_id", s.handlers.DebugDeleteFile)
 
 	// Proxy registration (telegym-proxy binds chat_ids → forward webhook)
 	s.router.POST("/debug/proxy/register", s.handlers.DebugProxyRegister)
@@ -212,14 +222,21 @@ func parseBotPath(p string) (token, method string, ok bool) {
 }
 
 func (s *Server) registerBotAPI(g *gin.RouterGroup) {
+	// Long polling
+	g.GET("/getUpdates", s.withBot(s.handlers.GetUpdates))
+	g.POST("/getUpdates", s.withBot(s.handlers.GetUpdates))
+
 	// Methods that return Message (or Update side-effect)
 	g.POST("/sendMessage", s.withBot(s.handlers.SendMessage))
 	g.POST("/sendPhoto", s.withBot(s.handlers.SendPhoto))
 	g.POST("/sendVideo", s.withBot(s.handlers.SendVideo))
 	g.POST("/sendAnimation", s.withBot(s.handlers.SendAnimation))
+	g.POST("/sendDocument", s.withBot(s.handlers.SendDocument))
+	g.POST("/sendMediaGroup", s.withBot(s.handlers.SendMediaGroup))
 	g.POST("/sendSticker", s.withBot(s.handlers.SendSticker))
 	g.POST("/sendDice", s.withBot(s.handlers.SendDice))
 	g.POST("/editMessageText", s.withBot(s.handlers.EditMessageText))
+	g.POST("/editMessageCaption", s.withBot(s.handlers.EditMessageCaption))
 	g.POST("/editMessageReplyMarkup", s.withBot(s.handlers.EditMessageReplyMarkup))
 	g.POST("/editMessageMedia", s.withBot(s.handlers.EditMessageMedia))
 
