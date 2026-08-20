@@ -18,6 +18,7 @@ type Store struct {
 	bots          map[string]*botEntry
 	messageIDSeed atomic.Int64
 	updateIDSeed  atomic.Int64
+	requestIDSeed atomic.Int64
 
 	Files *FileStore     // multipart upload retention for media proxying
 	Proxy *proxyRegistry // outbound forward bindings for real-TG relay
@@ -55,6 +56,10 @@ type botEntry struct {
 	toasts   map[int64][]Toast
 
 	updates *updateQueue
+
+	requestMu   sync.RWMutex
+	requests    []APIRequest
+	maxRequests int
 
 	maxMessages int
 	maxInputs   int
@@ -122,6 +127,7 @@ func (s *Store) Bot(token string) *botEntry {
 		firstSeen:   now,
 		maxMessages: defaultMaxMessages,
 		maxInputs:   1000,
+		maxRequests: defaultMaxRequests,
 		updates:     newUpdateQueue(),
 	}
 	b.lastSeen.Store(now)
@@ -205,8 +211,9 @@ func identityFromToken(token string) User {
 	}
 }
 
-func (s *Store) NextMessageID() int  { return int(s.messageIDSeed.Add(1)) }
-func (s *Store) NextUpdateID() int64 { return s.updateIDSeed.Add(1) }
+func (s *Store) NextMessageID() int   { return int(s.messageIDSeed.Add(1)) }
+func (s *Store) NextUpdateID() int64  { return s.updateIDSeed.Add(1) }
+func (s *Store) NextRequestID() int64 { return s.requestIDSeed.Add(1) }
 
 // SetWebhook records a webhook URL plus secret token for the bot.
 func (b *botEntry) SetWebhook(url, secret string) {

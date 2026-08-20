@@ -199,6 +199,33 @@ func (h *Handlers) DebugClearMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"cleared": n})
 }
 
+// DebugListRequests returns recent Bot API calls in invocation order. It is
+// useful for asserting boolean-returning methods whose effects are otherwise
+// invisible, such as deleteMessage and banChatMember.
+func (h *Handlers) DebugListRequests(c *gin.Context) {
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token path param required"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	requests := h.Store.Bot(token).Requests(c.Query("method"), limit)
+	c.JSON(http.StatusOK, gin.H{
+		"count":    len(requests),
+		"requests": requests,
+	})
+}
+
+func (h *Handlers) DebugClearRequests(c *gin.Context) {
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token path param required"})
+		return
+	}
+	n := h.Store.Bot(token).ClearRequests()
+	c.JSON(http.StatusOK, gin.H{"cleared": n})
+}
+
 // DebugListBots returns a snapshot of every bot the mock has seen since
 // startup, most-recently-active first. Powers the bot inventory on the
 // /debug/chat home page.
