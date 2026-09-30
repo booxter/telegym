@@ -144,6 +144,32 @@ func parseReplyMarkup(v any) *ReplyMarkup {
 	return &m
 }
 
+// rawJSON returns the JSON of a structured parameter: a JSON string over
+// multipart, an already decoded value over a JSON body.
+func rawJSON(v any) ([]byte, error) {
+	if text, ok := v.(string); ok {
+		return []byte(text), nil
+	}
+	return json.Marshal(v)
+}
+
+func parseReplyToMessageID(v any) int {
+	if v == nil {
+		return 0
+	}
+	raw, err := rawJSON(v)
+	if err != nil {
+		return 0
+	}
+	var params struct {
+		MessageID int `json:"message_id"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return 0
+	}
+	return params.MessageID
+}
+
 func parseEntities(v any) []Entity {
 	if v == nil {
 		return nil

@@ -45,6 +45,8 @@ type Message struct {
 	CaptionEntities []Entity     `json:"caption_entities,omitempty"`
 	ReplyMarkup     *ReplyMarkup `json:"reply_markup,omitempty"`
 	MediaGroupID    string       `json:"media_group_id,omitempty"`
+	ReplyToMessage  *Message     `json:"reply_to_message,omitempty"`
+	RichMessage     *RichMessage `json:"rich_message,omitempty"`
 
 	Photo     []PhotoSize `json:"photo,omitempty"`
 	Video     *Video      `json:"video,omitempty"`
@@ -60,6 +62,14 @@ type Message struct {
 	// so pollers can distinguish them. Real Telegram has no analogous
 	// field; clients that don't care can ignore it.
 	EventSeq int64 `json:"_event_seq,omitempty"`
+}
+
+// RichMessage keeps the blocks as the bot sent them; only the InputMedia
+// objects inside media blocks are replaced with the stored file objects, the
+// same shape real Telegram returns. The mock doesn't render html/markdown
+// content, so such messages come back without blocks.
+type RichMessage struct {
+	Blocks []any `json:"blocks"`
 }
 
 type Entity struct {
