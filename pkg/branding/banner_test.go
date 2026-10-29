@@ -2,6 +2,8 @@ package branding
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -64,5 +66,70 @@ func TestPrintBannerStripsForNonTTY(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "\x1b[") {
 		t.Errorf("PrintBanner left ANSI escapes in non-TTY output:\n%s", buf.String())
+	}
+}
+
+// TestPrintBannerKeepsColorsForCharDevice exercises the TTY branch of
+// isTerminal: /dev/null is a character device, so PrintBanner must treat
+// it like a terminal and write the colored banner unchanged.
+func TestPrintBannerKeepsColorsForCharDevice(t *testing.T) {
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if !isTerminal(f) {
+		t.Errorf("isTerminal(%s) = false, want true for a character device", os.DevNull)
+	}
+	PrintBanner(f)
+}
+
+// TestIsTerminalRejectsNonTTYFiles covers the *os.File paths that must
+// fall back to plain output: a regular file (redirected log) and a file
+// whose Stat fails (already closed).
+func TestIsTerminalRejectsNonTTYFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "banner.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isTerminal(f) {
+		t.Error("isTerminal(regular file) = true")
+	}
+
+	PrintBanner(f)
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != stripANSI(Banner) {
+		t.Error("PrintBanner to a regular file did not write the plain banner")
+	}
+
+	if isTerminal(f) {
+		t.Error("isTerminal(closed file) = true")
+	}
+}
+
+// TestPrintBannerToTTY checks that info is always delivered. With a
+// controlling terminal both go to /dev/tty and fallback stays empty;
+// without one (CI) the plain banner and info land in fallback.
+func TestPrintBannerToTTY(t *testing.T) {
+	var buf bytes.Buffer
+	PrintBannerToTTY(&buf, "listening on :5678\n")
+
+	if buf.Len() == 0 {
+		return // written to /dev/tty
+	}
+	out := buf.String()
+	if !strings.Contains(out, "load testing for telegram bots") || !strings.HasSuffix(out, "listening on :5678\n") {
+		t.Errorf("fallback output = %q, want plain banner followed by info", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Error("fallback output contains ANSI escapes")
 	}
 }
